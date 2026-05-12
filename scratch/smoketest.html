@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MyYTdub — translation smoke test</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 760px; margin: 32px auto; padding: 0 16px; color: #1a1a1a; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  p.sub { color: #555; margin-top: 0; }
+  .row { display: flex; gap: 12px; align-items: center; margin: 12px 0; flex-wrap: wrap; }
+  button { padding: 10px 18px; font-size: 16px; cursor: pointer; border: 1px solid #888; background: #fafafa; border-radius: 6px; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  textarea { width: 100%; height: 110px; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 8px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+  .status { padding: 4px 10px; border-radius: 12px; font-size: 13px; background: #eee; }
+  .status.live  { background: #cfe9cf; }
+  .status.error { background: #f7c8c8; }
+  label { font-size: 14px; }
+  select { padding: 4px 8px; font-size: 14px; }
+  pre.log { font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; background: #f6f6f6; padding: 8px; max-height: 180px; overflow: auto; border-radius: 4px; }
+  h3 { margin-bottom: 4px; font-size: 14px; }
+  code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+</style>
+</head>
+<body>
+
+<h1>MyYTdub — Realtime translation smoke test</h1>
+<p class="sub">Speak into your mic, hear it translated by OpenAI <code>gpt-realtime-translate</code>.</p>
+
+<div class="row">
+  <label>Target language:
+    <select id="lang">
+      <option value="lv" selected>Latvian (lv)</option>
+      <option value="en">English (en)</option>
+      <option value="es">Spanish (es)</option>
+      <option value="ru">Russian (ru)</option>
+      <option value="de">German (de)</option>
+      <option value="fr">French (fr)</option>
+    </select>
+  </label>
+  <span id="status" class="status">idle</span>
+</div>
+
+<div class="row">
+  <button id="start">Start</button>
+  <button id="stop" disabled>Stop</button>
+</div>
+
+<h3>You said (source transcript):</h3>
+<textarea id="srcTranscript" readonly></textarea>
+
+<h3>Translation (target transcript):</h3>
+<textarea id="dstTranscript" readonly></textarea>
+
+<h3>Log:</h3>
+<pre id="log" class="log"></pre>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const startBtn = $('start');
+const stopBtn  = $('stop');
+const langSel  = $('lang');
+const statusEl = $('status');
+const srcEl    = $('srcTranscript');
+const dstEl    = $('dstTranscript');
+const logEl    = $('log');
+
+let pc = null;
+let micStream = null;
+let audioEl = null;
+let dataChannel = null;
+
+const log = (msg) => {
+  const ts = new Date().toLocaleTimeString();
+  logEl.textContent += `[${ts}] ${msg}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+};
+
+const setStatus = (text, kind = '') => {
+  statusEl.textContent = text;
+  statusEl.className = 'status ' + kind;
+};
+
+async function mintToken() {
+  const r = await fetch('token.php', { method: 'POST' });
+  const text = await r.text();
+  let data;
+  try { data = JSON.parse(text); }
+  catch { throw new Error(`token.php returned non-JSON (${r.status}): ${text.slice(0, 200)}`); }
+  if (!r.ok) throw new Error(data.error?.message || data.error || `token mint failed (${r.status}): ${text.slice(0, 200)}`);
+  // Try several common shapes for the secret value.
+  const secret =
+    data.value ||
+    data?.client_secret?.value ||
+    data?.client_secret ||
+    null;
+  if (!secret) throw new Error('no client_secret in response: ' + JSON.stringify(data).slice(0, 300));
+  return secret;
+}
+
+async function start() {
+  startBtn.disabled = true;
+  srcEl.value = '';
+  dstEl.value = '';
+  setStatus('minting token…');
+
+  let token;
+  try {
+    token = await mintToken();
+    log('got ephemeral token');
+  } catch (e) {
+    setStatus('token error', 'error');
+    log(e.message);
+    startBtn.disabled = false;
+    return;
+  }
+
+  setStatus('getting mic…');
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    setStatus('mic denied', 'error');
+    log('getUserMedia failed: ' + e.message);
+    startBtn.disabled = false;
+    return;
+  }
+  log('mic granted');
+
+  setStatus('connecting…');
+  pc = new RTCPeerConnection();
+  pc.addTrack(micStream.getAudioTracks()[0], micStream);
+
+  audioEl = new Audio();
+  audioEl.autoplay = true;
+  pc.ontrack = ({ streams }) => {
+    audioEl.srcObject = streams[0];
+    log('remote audio track received');
+  };
+
+  pc.onconnectionstatechange = () => log('pc state: ' + pc.connectionState);
+  pc.oniceconnectionstatechange = () => log('ice: ' + pc.iceConnectionState);
+
+  dataChannel = pc.createDataChannel('oai-events');
+  dataChannel.onopen = () => {
+    log('data channel open');
+    const update = {
+      type: 'session.update',
+      session: { audio: { output: { language: langSel.value } } }
+    };
+    dataChannel.send(JSON.stringify(update));
+    log('sent session.update lang=' + langSel.value);
+    setStatus('live', 'live');
+    stopBtn.disabled = false;
+  };
+  dataChannel.onmessage = ({ data }) => {
+    let msg;
+    try { msg = JSON.parse(data); } catch { return; }
+    const t = msg.type || '';
+    if (t.endsWith('input_transcript.delta'))      srcEl.value += msg.delta || '';
+    else if (t.endsWith('output_transcript.delta')) dstEl.value += msg.delta || '';
+    else if (t === 'error' || t.endsWith('.error')) log('SERVER ERROR: ' + JSON.stringify(msg));
+    else                                            log('event: ' + t);
+  };
+
+  let answerSdp;
+  try {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    const resp = await fetch('https://api.openai.com/v1/realtime/translations/calls', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + token,
+        'Content-Type': 'application/sdp',
+      },
+      body: offer.sdp,
+    });
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error('SDP exchange ' + resp.status + ': ' + errText.slice(0, 300));
+    }
+    answerSdp = await resp.text();
+  } catch (e) {
+    setStatus('SDP error', 'error');
+    log(e.message);
+    cleanup();
+    return;
+  }
+
+  await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+  log('SDP exchange complete — speak now');
+}
+
+function cleanup() {
+  try { dataChannel?.close(); } catch {}
+  try { pc?.close(); } catch {}
+  pc = null;
+  dataChannel = null;
+  if (micStream) {
+    micStream.getTracks().forEach(t => t.stop());
+    micStream = null;
+  }
+  if (audioEl) {
+    audioEl.srcObject = null;
+    audioEl = null;
+  }
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  setStatus('idle');
+}
+
+stopBtn.onclick = () => { cleanup(); log('stopped'); };
+startBtn.onclick = start;
+</script>
+
+</body>
+</html>

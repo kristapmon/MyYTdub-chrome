@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MyYTdub</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+
+<div class="header">
+  <h1>MyYTdub</h1>
+  <span id="status" class="status">off</span>
+</div>
+
+<button id="toggle" class="toggle" disabled>Start dubbing</button>
+
+<p id="hint" class="hint hidden">Add your OpenAI API key in settings to enable dubbing.</p>
+
+<details id="settings">
+  <summary>Settings</summary>
+
+  <label>
+    <span>OpenAI API key</span>
+    <input type="password" id="apiKey" placeholder="sk-…" autocomplete="off" spellcheck="false">
+  </label>
+
+  <label>
+    <span>Target language</span>
+    <select id="lang">
+      <option value="lv">Latvian (lv)</option>
+      <option value="en">English (en)</option>
+      <option value="es">Spanish (es)</option>
+      <option value="ru">Russian (ru)</option>
+      <option value="de">German (de)</option>
+      <option value="fr">French (fr)</option>
+    </select>
+  </label>
+
+  <label>
+    <span>Original volume <span id="volLabel">20%</span></span>
+    <input type="range" id="vol" min="0" max="100" value="20">
+  </label>
+</details>
+
+<p class="note">Heads up: while dubbing is on, OpenAI bills about $0.034/min of audio.</p>
+
+<script src="popup.js"></script>
+</body>
+</html>
